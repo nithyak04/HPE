@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*_final_output.csv
+*_geo_summary.csv
+*_month_summary.csv
+*_quarter_bridge.csv
+*_source_actuals.csv

@@ -1,8 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
-import SectionHeader from './SectionHeader'
-import PricingBrief from '../pricing/PricingBrief'
-import AnalystMode from '../pricing/AnalystMode'
-import PvmView from '../pricing/PvmView'
+import PricingBrief from './PricingBrief'
+import AnalystMode from './AnalystMode'
+import PvmView from './PvmView'
 import { analyze, parseCsv, money } from '../../lib/pricingEngine'
 import { SAMPLE_ROWS, rowsToCsv } from '../../data/pricingSample'
 
@@ -12,8 +11,7 @@ const TABS = [
   { id: 'pvm', label: 'Price / volume / mix' },
 ]
 
-export default function PricingEngineSection({ section, onInteract }) {
-  const { eyebrow, title, lede } = section
+export default function PricingEngine() {
   const [dataset, setDataset] = useState({ name: 'Illustrative sample (synthetic)', rows: SAMPLE_ROWS, sample: true })
   const [periodType, setPeriodType] = useState('quarter')
   const [floorInput, setFloorInput] = useState('')
@@ -33,7 +31,6 @@ export default function PricingEngineSection({ section, onInteract }) {
     setDataset({ name, rows, sample })
     setFloorInput('')
     setLoadError(null)
-    onInteract?.()
   }
 
   const loadCsv = (name, text) => {
@@ -68,8 +65,6 @@ export default function PricingEngineSection({ section, onInteract }) {
 
   return (
     <>
-      <SectionHeader eyebrow={eyebrow} title={title} lede={lede} />
-
       <div className="pi-panel print-hide">
         <div className="pi-controls">
           <div className="pi-control-group">
@@ -135,17 +130,14 @@ export default function PricingEngineSection({ section, onInteract }) {
         <p className="callout">{result.error}</p>
       ) : (
         <>
-          <div className="toggle-tabs pi-tabs print-hide" role="tablist">
+          <div className="pi-tabs print-hide" role="tablist">
             {TABS.map((t) => (
               <button
                 key={t.id}
                 role="tab"
                 aria-selected={tab === t.id}
-                className={`toggle-tab${tab === t.id ? ' active' : ''}`}
-                onClick={() => {
-                  setTab(t.id)
-                  onInteract?.()
-                }}
+                className={`pi-tab${tab === t.id ? ' active' : ''}`}
+                onClick={() => setTab(t.id)}
               >
                 {t.label}
               </button>

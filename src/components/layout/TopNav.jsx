@@ -12,7 +12,7 @@ export default function TopNav() {
     <header className="topnav print-hide">
       <Link to="/" className="topnav-brand" onClick={close}>
         <span className="mark">H</span>
-        <span className="wordmark">HPE Onboarding</span>
+        <span className="wordmark">HPE</span>
       </Link>
 
       <button className="topnav-menu-btn" onClick={() => setOpen((o) => !o)} aria-label="Toggle navigation">

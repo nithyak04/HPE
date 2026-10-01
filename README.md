@@ -1,6 +1,6 @@
-# HPE Onboarding
+# HPE
 
-Interactive onboarding app for new hires on the Chips/AI finance team at HPE. Built as a single-page React app (Vite), no backend, deployable as a static site.
+Interactive modules and tools for the Chips/AI finance team at HPE. Built as a single-page React app (Vite), no backend, deployable as a static site.
 
 Three modules, selectable from the landing page or the top nav:
 

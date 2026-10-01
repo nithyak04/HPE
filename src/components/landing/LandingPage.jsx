@@ -10,7 +10,7 @@ export default function LandingPage() {
     <>
       <div className="landing-hero">
         <span className="eyebrow">Chips / AI Finance Team</span>
-        <h1>New hire onboarding</h1>
+        <h1>HPE</h1>
         <p>
           Short interactive modules covering what HPE sells and how the money works, the tools you’ll use every
           week, and a pricing intelligence engine you can run on real data. Pick a module below — your progress is

@@ -15,7 +15,7 @@ export default function App() {
           </Routes>
         </main>
         <footer className="app-footer print-hide">
-          HPE Onboarding · Chips/AI Finance Team · Progress saved locally on this device
+          HPE · Chips/AI Finance Team · Progress saved locally on this device
         </footer>
       </div>
     </BrowserRouter>

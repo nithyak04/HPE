@@ -996,10 +996,13 @@ export function analyze(rawRows, { periodType = 'quarter', materialityFloor } = 
   flags = consolidateShifts(flags, shifts)
 
   const sevRank = { high: 0, watch: 1, opportunity: 2 }
+  flags
+    .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || b.exposure.amount - a.exposure.amount)
+    .forEach((f, i) => (f.id = `sig-${i}`))
   const material = flags.filter((f) => f.exposure.amount >= floor)
   const belowFloor = flags.filter((f) => f.exposure.amount < floor)
   material.sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || b.exposure.amount - a.exposure.amount)
-  const alerts = material.slice(0, THRESHOLDS.maxAlerts).map((f, i) => ({ ...f, id: `alert-${i}` }))
+  const alerts = material.slice(0, THRESHOLDS.maxAlerts)
   const overflow = material.slice(THRESHOLDS.maxAlerts)
 
   const bridge = pvm(items, annual)
@@ -1030,6 +1033,7 @@ export function analyze(rawRows, { periodType = 'quarter', materialityFloor } = 
     present,
   }
   result.summary = executiveSummary(result)
+  result.signals = flags
   result.opportunities = flags.filter((f) => f.severity === 'opportunity').sort((a, b) => b.exposure.amount - a.exposure.amount)
   result.questions = humanReviewQuestions(result)
   return result

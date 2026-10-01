@@ -8,6 +8,7 @@ import FinanceRoleSection from './FinanceRoleSection'
 import WalkthroughSection from './WalkthroughSection'
 import CheatsheetSection from './CheatsheetSection'
 import GotchasSection from './GotchasSection'
+import PricingEngineSection from './PricingEngineSection'
 
 // Maps a section's `type` field (set in the data files) to the component
 // that renders it. Add a new section type by adding a component + an entry
@@ -22,6 +23,7 @@ const TYPE_MAP = {
   walkthrough: WalkthroughSection,
   cheatsheet: CheatsheetSection,
   gotchas: GotchasSection,
+  'pricing-engine': PricingEngineSection,
 }
 
 export default function SectionRenderer({ section, markComplete, onJumpNext }) {

@@ -2,10 +2,19 @@
 
 Interactive onboarding app for new hires on the Chips/AI finance team at HPE. Built as a single-page React app (Vite), no backend, deployable as a static site.
 
-Two modules, selectable from the landing page or the top nav:
+Three modules, selectable from the landing page or the top nav:
 
 - **HPE 101** — org structure, product lines, the GreenLake consumption billing model (with a live bill simulator), why hybrid cloud exists, and where finance fits in.
 - **Copilot & Power BI 101** — vocabulary, a real variance-analysis (actual vs. budget) walkthrough with the actual DAX formula, a Copilot-for-FP&A walkthrough, a finance prompt cheat sheet, and common beginner gotchas.
+- **Pricing Intelligence 101** — pricing vocabulary plus a working Pricing Strategy Intelligence Engine: load a CSV of internal pricing and competitor data (or the built-in synthetic sample) and get a prioritized brief with 🔴/🟠/🟢 alerts, financial exposure, ranked root-cause hypotheses, price/volume/mix bridges, elasticity signals, competitor moves, and an analyst Q&A mode.
+
+## Pricing engine
+
+The engine is a deterministic rules engine in `src/lib/pricingEngine.js` — no LLM, no backend; uploaded data never leaves the browser. It compares the latest two periods in the file.
+
+Input is one row per SKU × region × channel × period. Required columns: `period`, `sku`, `asp`, `units`. Optional columns unlock more analysis, and anything missing is reported in the brief's "Data gaps" section rather than guessed: `product`, `family`, `region`, `channel`, `list_price`, `unit_cost`, `competitor`, `competitor_product`, `competitor_price`, `competitor_promo` (Y/N), `market_share`. The "Download template" button in the app exports the sample in this exact shape.
+
+Flag thresholds live in the `THRESHOLDS` object at the top of `pricingEngine.js`. The sample dataset (`src/data/pricingSample.js`) is synthetic — made-up products, "Competitor A/B/C", and numbers.
 
 ## Local development
 
@@ -32,14 +41,15 @@ npm run preview   # serve the production build locally to sanity-check it
 
 ## Updating content
 
-All copy lives in two files, structured as a commented array of section objects — no JSX or markup editing required to change text:
+All copy lives in the module data files, structured as a commented array of section objects — no JSX or markup editing required to change text:
 
 - `src/data/hpe101.js`
 - `src/data/copilotPowerBi.js`
+- `src/data/pricingIntelligence.js`
 
-Both are registered in `src/data/modules.js`. To add a third module, create a new data file following the same shape and add it to the `modules` array there; the landing page, nav, and progress tracker all pick it up automatically.
+All are registered in `src/data/modules.js`. To add another module, create a new data file following the same shape and add it to the `modules` array there; the landing page, nav, and progress tracker all pick it up automatically.
 
-Each section has a `type` (e.g. `intro`, `flipgrid`, `simulator`, `toggle`, `reasons`, `finance-role`, `walkthrough`, `cheatsheet`, `gotchas`) that maps to a renderer component in `src/components/sections/SectionRenderer.jsx`. Add a new section type by adding a component there plus an entry in `TYPE_MAP`.
+Each section has a `type` (e.g. `intro`, `flipgrid`, `simulator`, `toggle`, `reasons`, `finance-role`, `walkthrough`, `cheatsheet`, `gotchas`, `pricing-engine`) that maps to a renderer component in `src/components/sections/SectionRenderer.jsx`. Add a new section type by adding a component there plus an entry in `TYPE_MAP`.
 
 ## Progress tracking
 

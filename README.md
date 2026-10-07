@@ -46,6 +46,7 @@ npm run preview   # serve the build locally
 
 It builds to plain static files, so any static host works.
 
+- **Cloudflare Workers** (`https://hpe.<account>.workers.dev`): `wrangler.jsonc` serves `dist/` as static assets. Cloudflare's Git integration runs `npm run build`, then `npx wrangler deploy`. The `name` in `wrangler.jsonc` must match the Worker's name in the dashboard.
 - **GitHub Pages** (`https://nithyak04.github.io/HPE/`): `.github/workflows/deploy-pages.yml` builds and deploys on every push to the default branch. One-time setup: repo Settings → Pages → Source: **GitHub Actions**.
 - **Vercel**: connected to the repo; production deploys from the default branch.
 - **Offline**: the build can also be inlined into a single HTML file that opens straight from disk.

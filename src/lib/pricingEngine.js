@@ -927,19 +927,51 @@ function niceRound(n) {
 // ----------------------------------------------------------------------------
 // Main entry point
 // ----------------------------------------------------------------------------
-export function analyze(rawRows, { periodType = 'quarter', materialityFloor } = {}) {
-  const annual = { month: 12, quarter: 4, year: 1 }[periodType] ?? 4
+export function analyze(rawRows, opts = {}) {
   const { records, skipped, present, missingRequired } = normalizeRows(rawRows)
   if (missingRequired.length) return { error: `Missing required column${missingRequired.length > 1 ? 's' : ''}: ${missingRequired.join(', ')}.` }
   if (!records.length) return { error: 'No usable rows. Each row needs period, sku, a positive asp and units.' }
 
+  const result = analyzeRecords(records, present, skipped, opts)
+
+  // Outcome loop: with 3+ periods, rerun the engine as of the previous period
+  // (same materiality floor), take the recommendations it would have issued,
+  // and check them against what the latest period actually shows.
+  result.trackRecord = null
+  if (result.meta.periods.length >= 3) {
+    const prev = analyzeRecords(
+      records.filter((r) => r.period !== result.meta.current),
+      present,
+      0,
+      { ...opts, materialityFloor: result.meta.floor }
+    )
+    result.trackRecord = backtest(prev, result)
+  }
+  result.brief = decisionBrief(result)
+  result.questions = humanReviewQuestions(result)
+  return result
+}
+
+function analyzeRecords(records, present, skipped, { periodType = 'quarter', materialityFloor } = {}) {
+  const annual = { month: 12, quarter: 4, year: 1 }[periodType] ?? 4
   const periods = [...new Set(records.map((r) => r.period))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
   const current = periods.at(-1)
   const prior = periods.length > 1 ? periods.at(-2) : null
-  const curMap = aggregate(records.filter((r) => r.period === current))
-  const priorMap = prior ? aggregate(records.filter((r) => r.period === prior)) : new Map()
+  const maps = Object.fromEntries(periods.map((p) => [p, aggregate(records.filter((r) => r.period === p))]))
+  const curMap = maps[current]
+  const priorMap = prior ? maps[prior] : new Map()
   const keys = [...new Set([...priorMap.keys(), ...curMap.keys()])]
-  const items = keys.map((k) => buildItem(k, priorMap.get(k), curMap.get(k), annual))
+  const items = keys.map((k) => {
+    const it = buildItem(k, priorMap.get(k), curMap.get(k), annual)
+    // Full price path across every period in the file, for timelines.
+    it.series = periods
+      .map((p) => {
+        const a = maps[p].get(k)
+        return a && { period: p, asp: a.asp, units: a.units, compPrice: a.compPrice, compPromo: a.compPromo, share: a.share }
+      })
+      .filter(Boolean)
+    return it
+  })
 
   const totalAnnRev = items.reduce((s, it) => s + it.annRev, 0)
   const floor = materialityFloor ?? niceRound(totalAnnRev * THRESHOLDS.defaultMaterialityShare)
@@ -998,7 +1030,10 @@ export function analyze(rawRows, { periodType = 'quarter', materialityFloor } = 
   const sevRank = { high: 0, watch: 1, opportunity: 2 }
   flags
     .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || b.exposure.amount - a.exposure.amount)
-    .forEach((f, i) => (f.id = `sig-${i}`))
+    .forEach((f, i) => {
+      f.id = `sig-${i}`
+      f.decision = decide(f)
+    })
   const material = flags.filter((f) => f.exposure.amount >= floor)
   const belowFloor = flags.filter((f) => f.exposure.amount < floor)
   material.sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || b.exposure.amount - a.exposure.amount)
@@ -1029,55 +1064,361 @@ export function analyze(rawRows, { periodType = 'quarter', materialityFloor } = 
     moves,
     shifts,
     trends: trendList,
+    patterns: patternCards(items, shifts, gaps, annual),
     dataGaps,
     present,
   }
-  result.summary = executiveSummary(result)
   result.signals = flags
   result.opportunities = flags.filter((f) => f.severity === 'opportunity').sort((a, b) => b.exposure.amount - a.exposure.amount)
-  result.questions = humanReviewQuestions(result)
   return result
 }
 
 // ----------------------------------------------------------------------------
 // Brief narrative
 // ----------------------------------------------------------------------------
-function executiveSummary(r) {
-  const s = []
-  const { pvm: b, alerts, meta } = r
-  if (b) {
-    const [dk, dv] = largestDriver(b.revenue, ['price', 'volume', 'mix'])
-    s.push(
-      `Revenue on continuing products is ${b.revenue.total >= 0 ? 'up' : 'down'} ${money(Math.abs(b.revenue.total))} (${pct(b.revenue.total / b.revenue.prior)}) ${meta.current} vs ${meta.prior}; the ${dk} effect is the largest driver at ${money(dv)}.`
-    )
-    if (b.margin) {
-      const [mk, mv] = largestDriver(b.margin, ['price', 'volume', 'mix', 'cost'])
-      s.push(`Gross margin ${b.margin.total >= 0 ? 'rose' : 'fell'} ${money(Math.abs(b.margin.total))} over the same period, driven mostly by ${mk} (${money(mv)}).`)
+// ----------------------------------------------------------------------------
+// Decision layer: FACT → SIGNAL → HYPOTHESIS → RECOMMENDATION → ACTION → OUTCOME
+// ----------------------------------------------------------------------------
+// Every signal ends in a verdict, the condition that should make the team
+// reassess it, and the money at stake. `check` is machine-readable so the
+// backtest can test the call against the next period's data.
+const unitsTrigger = `units fall more than ${Math.abs(THRESHOLDS.unitsLoss * 100)}%`
+const shareTrigger = `share drops more than ${Math.abs(THRESHOLDS.shareLossPts)} pt`
+
+function volumeEvidence(items) {
+  if (items.length === 1) {
+    const i = items[0]
+    const share = i.shareChgPts != null ? ` and share ${ptsFmt(i.shareChgPts)}` : ''
+    const prem = i.c?.premium != null ? ` with our price now ${pct(i.c.premium)} vs ${i.competitor || 'the competitor'}` : ''
+    return `Units ${pct(i.unitsChg)}${share}${prem}. No volume evidence yet that we need to follow.`
+  }
+  return `Units and share held up on all ${items.length} products (${items.map((i) => `${i.sku} ${pct(i.unitsChg)}`).join(', ')}).`
+}
+
+function decide(f) {
+  const T = THRESHOLDS
+  const it = f.items[0]
+  const comp = it.competitor || 'the competitor'
+  const stake = (label) => ({ amount: f.exposure.amount, label })
+  const hold = { kind: 'hold', unitsMin: T.unitsLoss, shareMin: T.shareLossPts }
+  const priceUp = { kind: 'price-up' }
+
+  switch (f.type) {
+    case 'competitor-cut':
+    case 'competitor-strategy': {
+      const slipping = f.items.filter((i) => (i.unitsChg ?? 0) <= T.unitsLoss || (i.shareChgPts ?? 0) <= T.shareLossPts)
+      if (!slipping.length) {
+        return {
+          verdict: 'HOLD',
+          headline: `Hold price. Don't match ${comp}'s cut yet.`,
+          why: volumeEvidence(f.items),
+          reassess: [unitsTrigger, shareTrigger],
+          outcome: stake('revenue at stake if we matched the cut'),
+          check: hold,
+        }
+      }
+      const partial = f.items.length > 1 && slipping.length < f.items.length
+      return {
+        verdict: 'RESPOND',
+        headline: partial
+          ? `Respond on ${slipping.map((i) => i.label).join(', ')}; hold the other ${f.items.length - slipping.length}.`
+          : `Model a partial match to ${comp} before the next period.`,
+        why: `${slipping.map((i) => `${i.label}: units ${pct(i.unitsChg)}${i.shareChgPts != null ? `, share ${ptsFmt(i.shareChgPts)}` : ''}`).join('; ')}. Volume is already responding to the wider gap.`,
+        reassess: [`${comp}'s price comes back up next period`],
+        outcome: stake('revenue at stake if we matched in full'),
+        check: { kind: 'volume' },
+      }
+    }
+    case 'competitor-promo':
+      return {
+        verdict: 'HOLD',
+        headline: `Hold list price. Don't answer a promotion with a permanent cut.`,
+        why: `${comp}'s move is flagged as promotional. Our units ${pct(it.unitsChg)} so far.`,
+        reassess: ['the promotion runs into a second period', unitsTrigger],
+        outcome: stake('revenue at stake if we matched the promo for a year'),
+        check: hold,
+      }
+    case 'promo-expired':
+      return {
+        verdict: 'RECOVER',
+        headline: 'Unwind any defensive discounts given during the promo.',
+        why: `${comp} is back to ${price(it.c.compPrice)}, so the pressure behind those discounts is gone.`,
+        reassess: ['units fall more than 3% after unwinding'],
+        outcome: stake('upside from a 2% ASP recovery'),
+        check: priceUp,
+      }
+    case 'competitor-increase':
+    case 'pricing-power':
+    case 'underpriced': {
+      const headline = {
+        'competitor-increase': `Test a 2–3% increase while ${comp} is higher.`,
+        'pricing-power': 'Test a further 2–3% increase.',
+        underpriced: 'Stage a 3–5% increase after a spec check.',
+      }[f.type]
+      const why = {
+        'competitor-increase': `${comp} moved ${pct(it.compChg)} and our relative price improved without us changing anything.`,
+        'pricing-power': `Units ${pct(it.unitsChg)} through a ${pct(it.aspChg)} increase.`,
+        underpriced: `We sit ${pct(Math.abs(it.c.premium ?? 0), { signed: false })} below ${comp} while share is ${ptsFmt(it.shareChgPts ?? 0)}.`,
+      }[f.type]
+      return { verdict: 'TEST INCREASE', headline, why, reassess: ['units fall more than 3% after the increase'], outcome: stake('upside at current volume'), check: priceUp }
+    }
+    case 'asp-decline': {
+      const incremental = it.unitsChg != null && it.unitsChg >= Math.abs(it.aspChg) * 1.5 && it.revChg > 0
+      if (incremental) {
+        return {
+          verdict: 'MONITOR',
+          headline: 'Let it run, but set a price floor.',
+          why: `The lower price is buying volume: units ${pct(it.unitsChg)}, revenue ${pct(it.revChg)}.`,
+          reassess: ['ASP falls another 2%', 'unit growth stalls'],
+          outcome: stake('annualized price given up so far'),
+          check: { kind: 'asp-stable' },
+        }
+      }
+      const listFlat = it.listChg != null && Math.abs(it.listChg) < 0.01
+      return {
+        verdict: 'INVESTIGATE',
+        headline: it.discChgPts >= THRESHOLDS.discountJumpPts ? 'Investigate the discounting before it becomes the new price.' : 'Find where the ASP decline is concentrated.',
+        why: `ASP ${pct(it.aspChg)}${listFlat ? ' with list price unchanged' : ''}; units ${pct(it.unitsChg)}, so the discount isn't buying volume.`,
+        reassess: ['ASP falls another 2%'],
+        outcome: stake('annualized revenue already given up'),
+        check: { kind: 'asp-stable' },
+      }
+    }
+    case 'margin-compression': {
+      const costDriven = f.title.includes('cost-driven')
+      return {
+        verdict: costDriven ? 'ADDRESS COST' : 'INVESTIGATE',
+        headline: costDriven ? 'Recover the cost increase through price or sourcing.' : 'Review discounting before touching list price.',
+        why: costDriven ? `Unit cost ${pct(it.costChg)} while ASP ${pct(it.aspChg)}. Holding or cutting price won't fix this.` : `Price realization is driving the margin decline (ASP ${pct(it.aspChg)}).`,
+        reassess: ['gross margin falls another point'],
+        outcome: stake('gross margin lost per year if it persists'),
+        check: { kind: 'margin-stable' },
+      }
+    }
+    case 'elasticity-concern':
+      return {
+        verdict: 'REASSESS',
+        headline: 'Review the increase. Volume is responding.',
+        why: `Units ${pct(it.unitsChg)} after a ${pct(it.aspChg)} price move; revenue ${pct(it.revChg)}.`,
+        reassess: ['units keep falling next period'],
+        outcome: stake('annualized net revenue decline'),
+        check: { kind: 'volume' },
+      }
+    case 'premium-expansion':
+      return {
+        verdict: 'RESPOND',
+        headline: 'Narrow the premium.',
+        why: `Premium widened ${ptsFmt(it.premChgPts)} while volume or share fell.`,
+        reassess: ['share keeps falling'],
+        outcome: stake('annualized revenue from lost units'),
+        check: { kind: 'volume' },
+      }
+    case 'pricing-gap':
+      return {
+        verdict: 'INVESTIGATE',
+        headline: `Decide whether the ${it.sku} gap is intentional.`,
+        why: f.what[0],
+        reassess: ['the gap widens again'],
+        outcome: stake('value of closing half the gap'),
+        check: { kind: 'asp-stable' },
+      }
+    default:
+      return {
+        verdict: 'MONITOR',
+        headline: 'Monitor. No action yet.',
+        why: f.why,
+        reassess: ['the move holds for a second period'],
+        outcome: stake('estimated exposure'),
+        check: { kind: 'none' },
+      }
+  }
+}
+
+// Test one product against a recommendation's check, using the next period.
+function evaluate(check, it) {
+  if (!it || it.status !== 'matched') return { status: 'nodata', text: 'No comparable data in the latest period.' }
+  const u = `units ${pct(it.unitsChg)}`
+  const s = it.shareChgPts != null ? `, share ${ptsFmt(it.shareChgPts)}` : ''
+  switch (check.kind) {
+    case 'hold': {
+      const ok = it.unitsChg > check.unitsMin && (it.shareChgPts == null || it.shareChgPts > check.shareMin)
+      return ok ? { status: 'held', text: `${it.sku}: ${u}${s}. Hold supported.` } : { status: 'missed', text: `${it.sku}: ${u}${s}. Reassess trigger hit.` }
+    }
+    case 'price-up':
+      if (it.aspChg < 0.01) return { status: 'open', text: `${it.sku}: ASP ${pct(it.aspChg)}. Not acted on yet.` }
+      return it.unitsChg >= -0.03
+        ? { status: 'held', text: `${it.sku}: ASP ${pct(it.aspChg)}, ${u}. Price stuck.` }
+        : { status: 'missed', text: `${it.sku}: ASP ${pct(it.aspChg)} but ${u}. Volume responded.` }
+    case 'asp-stable':
+      return it.aspChg >= -0.01
+        ? { status: 'held', text: `${it.sku}: ASP ${pct(it.aspChg)}. Decline stopped.` }
+        : { status: 'missed', text: `${it.sku}: ASP ${pct(it.aspChg)}. Still eroding.` }
+    case 'margin-stable':
+      if (it.gmChgPts == null) return { status: 'nodata', text: `${it.sku}: no cost data.` }
+      return it.gmChgPts >= -0.5
+        ? { status: 'held', text: `${it.sku}: GM ${ptsFmt(it.gmChgPts)}. Margin stabilized.` }
+        : { status: 'missed', text: `${it.sku}: GM ${ptsFmt(it.gmChgPts)}. Still compressing.` }
+    case 'volume':
+      return it.unitsChg >= 0
+        ? { status: 'held', text: `${it.sku}: ${u}${s}. Volume recovered.` }
+        : { status: 'missed', text: `${it.sku}: ${u}${s}. Still losing volume.` }
+    default:
+      return { status: 'open', text: `${it.sku}: monitored.` }
+  }
+}
+
+function backtest(prev, cur) {
+  const now = new Map(cur.items.map((i) => [i.key, i]))
+  const rows = prev.alerts
+    .filter((f) => f.decision.verdict !== 'MONITOR')
+    .map((f) => {
+      const evals = f.items.map((i) => evaluate(f.decision.check, now.get(i.key)))
+      const st = evals.map((e) => e.status)
+      const status = st.every((x) => x === 'held') ? 'held' : st.includes('missed') ? 'missed' : st.every((x) => x === 'nodata') ? 'nodata' : 'open'
+      return {
+        id: f.id,
+        verdict: f.decision.verdict,
+        headline: f.decision.headline,
+        title: f.title,
+        where: f.items.length > 1 ? `${f.items.length} products` : f.items[0].label,
+        stake: f.decision.outcome,
+        status,
+        detail: evals.map((e) => e.text).join(' '),
+      }
+    })
+  return {
+    issuedIn: prev.meta.current,
+    basis: `${prev.meta.prior} → ${prev.meta.current}`,
+    checkedIn: cur.meta.current,
+    rows,
+    held: rows.filter((r) => r.status === 'held').length,
+    missed: rows.filter((r) => r.status === 'missed').length,
+  }
+}
+
+// Cross-product patterns, quantified. Only built from columns present.
+function patternCards(items, shifts, gaps, annual) {
+  const T = THRESHOLDS
+  const out = []
+  const matched = items.filter((it) => it.status === 'matched')
+  const seen = new Set()
+  for (const dim of ['region', 'channel', 'family']) {
+    const groups = {}
+    matched.forEach((it) => it[dim] !== '—' && (groups[it[dim]] ||= []).push(it))
+    for (const [name, g] of Object.entries(groups)) {
+      // Leakage = ASP down without a matching volume response.
+      const hit = g.filter((it) => it.aspChg <= T.aspDropWatch && !(it.unitsChg >= Math.abs(it.aspChg) * 1.5))
+      if (hit.length < T.trendMinProducts) continue
+      const sig = hit.map((i) => i.key).sort().join('|')
+      if (seen.has(sig)) continue
+      seen.add(sig)
+      const realized = hit.reduce((s, i) => s + i.c.asp * i.c.units, 0) / hit.reduce((s, i) => s + i.p.asp * i.c.units, 0) - 1
+      const exposure = hit.reduce((s, i) => s + (i.p.asp - i.c.asp) * i.c.units * annual, 0)
+      const listFlat = hit.every((i) => i.listChg != null && Math.abs(i.listChg) < 0.01)
+      const disc = hit.filter((i) => i.discChgPts != null)
+      const discPts = disc.length ? disc.reduce((s, i) => s + i.discChgPts * i.c.units * i.c.listPrice, 0) / disc.reduce((s, i) => s + i.c.units * i.c.listPrice, 0) : null
+      const channels = [...new Set(hit.map((i) => i.channel))]
+      out.push({
+        kind: 'leakage',
+        severity: 'watch',
+        title: listFlat ? `Discount leakage emerging in ${name}` : `Price erosion across ${name}`,
+        scope: `${hit.length} of ${g.length} ${name} product lines · ${channels.length} channel${channels.length > 1 ? 's' : ''}`,
+        metrics: [
+          ['Realized ASP', pct(realized)],
+          ['List price', listFlat ? 'Unchanged' : 'Moved'],
+          discPts != null && ['Discount depth', ptsFmt(discPts)],
+          ['Units', hit.every((i) => Math.abs(i.unitsChg) < T.flatUnits) ? 'Flat' : 'Mixed'],
+        ].filter(Boolean),
+        exposure,
+        exposureLabel: 'annualized price given up; flows straight to gross margin',
+        driver: listFlat ? 'Discounting, not list-price moves.' : 'A mix of list-price changes and discounting.',
+        investigate: `Deal-level discount approvals for ${hit.map((i) => i.sku).join(', ')} (${channels.join(' / ')}).`,
+        products: hit.map((i) => i.label),
+      })
+    }
+    if (dim === 'family') {
+      for (const [name, g] of Object.entries(groups)) {
+        const hit = g.filter((it) => it.gmChgPts <= -T.gmDropWatchPts)
+        if (hit.length < T.trendMinProducts) continue
+        out.push({
+          kind: 'margin',
+          severity: 'watch',
+          title: `Margin compression across ${name}`,
+          scope: `${hit.length} of ${g.length} product lines`,
+          metrics: hit.map((i) => [i.sku, ptsFmt(i.gmChgPts)]),
+          exposure: hit.reduce((s, i) => s + (Math.abs(i.gmChgPts) / 100) * i.annRev, 0),
+          exposureLabel: 'annualized gross margin lost if current GM% persists',
+          driver: 'See the margin bridge for the cost vs price split.',
+          investigate: `Cost bridge for ${name}.`,
+          products: hit.map((i) => i.label),
+        })
+      }
     }
   }
-  const n = (sev) => alerts.filter((a) => a.severity === sev).length
-  const top = alerts[0]
-  if (top) {
-    s.push(
-      `${n('high')} high-priority, ${n('watch')} watch and ${n('opportunity')} opportunity flags cleared the ${money(meta.floor)} materiality floor; the largest is “${top.title}” on ${top.items.length > 1 ? `${top.items.length} products` : top.items[0].label} (~${money(top.exposure.amount)} annualized).`
-    )
-  } else {
-    s.push(`No developments cleared the ${money(meta.floor)} materiality floor this period.`)
+  for (const sh of shifts) {
+    const keys = new Set(sh.moves.map((m) => m.against))
+    const its = matched.filter((i) => keys.has(i.label))
+    const avg = sh.moves.reduce((a, m) => a + m.change, 0) / sh.moves.length
+    out.push({
+      kind: 'competitor',
+      severity: sh.dir === 'down' ? 'high' : 'opportunity',
+      title: `${sh.competitor} is repricing ${sh.dir === 'down' ? 'down' : 'up'}`,
+      scope: `${sh.moves.length} products in one period · non-promotional`,
+      metrics: [
+        ['Avg move', pct(avg)],
+        ['Our units', its.length ? pct(its.reduce((s, i) => s + i.c.units, 0) / its.reduce((s, i) => s + i.p.units, 0) - 1) : '—'],
+      ],
+      exposure: its.reduce((s, i) => s + Math.abs(i.compChg ?? 0) * i.annRev, 0),
+      exposureLabel: sh.dir === 'down' ? 'revenue at stake if we matched every move' : 'revenue if we followed every move',
+      driver: 'Same competitor, same direction, same period: a strategy change, not noise.',
+      investigate: `Map ${sh.competitor}'s new price architecture before any single-SKU response.`,
+      products: sh.moves.map((m) => m.against),
+    })
   }
-  const shift = r.shifts[0]
-  if (shift) s.push(`${shift.competitor} moved price ${shift.dir} on ${shift.moves.length} products at once — treat it as a strategy change, not noise.`)
-  const opp = alerts.filter((a) => a.severity === 'opportunity')[0]
-  if (opp) s.push(`Biggest upside: “${opp.title}” on ${opp.items[0].label} (~${money(opp.exposure.amount)}).`)
-  return s.slice(0, 5)
+  return out.sort((a, b) => b.exposure - a.exposure)
+}
+
+// The executive layer: what you need to know, what needs a decision, what to watch.
+function decisionBrief(r) {
+  const { pvm: b, alerts, meta, patterns } = r
+  const know = []
+  if (b) {
+    const rev = b.revenue.total
+    if (b.margin) {
+      const gm = b.margin.total
+      const [mk, mv] = largestDriver(b.margin, ['price', 'volume', 'mix', 'cost'])
+      const joiner = Math.sign(rev) !== Math.sign(gm) ? 'but' : 'and'
+      const share = Math.sign(mv) === Math.sign(gm) && gm !== 0 ? `, ${Math.round((mv / gm) * 100)}% of it from ${mk}` : `, driven mostly by ${mk}`
+      know.push(`Revenue ${rev >= 0 ? 'up' : 'down'} ${money(Math.abs(rev))} vs ${meta.prior}, ${joiner} gross margin ${gm >= 0 ? 'up' : 'down'} ${money(Math.abs(gm))}${share}.`)
+    } else {
+      const [dk, dv] = largestDriver(b.revenue, ['price', 'volume', 'mix'])
+      know.push(`Revenue ${rev >= 0 ? 'up' : 'down'} ${money(Math.abs(rev))} vs ${meta.prior}; ${dk} is the largest driver (${money(dv)}).`)
+    }
+  }
+  const comp = alerts.filter((a) => a.category === 'competitor' && a.severity === 'high')
+  if (comp.length) {
+    const holds = comp.filter((a) => a.decision.verdict === 'HOLD').length
+    know.push(`${comp.length} major competitor move${comp.length > 1 ? 's' : ''} this period; volume evidence supports holding price on ${holds} of ${comp.length}.`)
+  }
+  const pattern = patterns.find((x) => !comp.length || x.kind !== 'competitor')
+  if (pattern) know.push(`${pattern.title}: ${pattern.scope} (~${money(pattern.exposure)} ${pattern.kind === 'leakage' ? 'of price given up' : 'at stake'}).`)
+
+  const decide = alerts.filter((a) => a.decision.verdict !== 'MONITOR').slice(0, 4)
+  const watch = [...alerts.filter((a) => a.decision.verdict === 'MONITOR'), ...r.overflow, ...r.belowFloor]
+  return { know: know.slice(0, 3), decide, watch, decisionCount: alerts.filter((a) => a.decision.verdict !== 'MONITOR').length }
 }
 
 function humanReviewQuestions(r) {
   const q = []
   for (const a of r.alerts) {
-    if (a.type === 'competitor-strategy' || a.type === 'competitor-cut') {
-      q.push(`Respond to ${a.items[0].competitor || 'the competitor'} on ${a.items.length > 1 ? `${a.items.length} products` : a.items[0].label}, or hold the premium? Matching costs up to ~${money(a.exposure.amount)} a year at current volume; holding risks further share loss.`)
+    const comp = a.items[0].competitor || 'the competitor'
+    const where = a.items.length > 1 ? `${a.items.length} products` : a.items[0].label
+    if ((a.type === 'competitor-strategy' || a.type === 'competitor-cut') && a.decision?.verdict === 'HOLD') {
+      q.push(`Confirm the hold against ${comp} on ${where}? Volume doesn't call for a response yet; matching would put ~${money(a.exposure.amount)} a year at stake.`)
+    } else if (a.type === 'competitor-strategy' || a.type === 'competitor-cut') {
+      q.push(`How far to respond to ${comp} on ${where}: partial match, targeted deal support, or hold and accept share loss?`)
     } else if (a.type === 'competitor-promo') {
-      q.push(`Do we defend ${a.items[0].label} against a temporary promotion, or wait it out?`)
+      q.push(`Comfortable holding list price on ${a.items[0].label} through ${comp}'s promotion?`)
     } else if (a.type === 'margin-compression' && a.title.includes('cost-driven')) {
       q.push(`Pass the cost increase on ${a.items[0].label} through to price, absorb it, or wait for cost relief?`)
     } else if (a.type === 'asp-decline' && a.severity === 'high') {
@@ -1097,6 +1438,9 @@ function humanReviewQuestions(r) {
 // ----------------------------------------------------------------------------
 export const ANALYST_QUESTIONS = [
   { id: 'first', q: 'What should the pricing team investigate first?', keywords: ['first', 'priorit', 'investigate', 'today', 'know'] },
+  { id: 'match', q: 'Should we match competitor price cuts?', keywords: ['match', 'follow', 'respond to', 'should we cut'] },
+  { id: 'worry', q: 'What should I worry about besides competitors?', keywords: ['worry', 'instead', 'besides', 'other than'] },
+  { id: 'track', q: 'How did last period’s recommendations hold up?', keywords: ['last period', 'track record', 'hold up', 'held up', 'worked', 'validated', 'backtest'] },
   { id: 'losing-price', q: 'Where are we losing price?', keywords: ['losing price', 'asp', 'realization', 'erosion', 'losing'] },
   { id: 'comp-risk', q: 'Which products have the biggest competitive pricing risk?', keywords: ['competitive', 'risk', 'threat'] },
   { id: 'margin', q: 'Why is margin declining?', keywords: ['margin', 'gm', 'gross'] },
@@ -1134,6 +1478,47 @@ export function answerQuestion(r, id) {
           : 'Nothing at risk-level cleared the materiality floor. Start with the opportunities list.',
         columns: [col('title', 'Alert'), col('where', 'Where'), col('exposure', 'Est. exposure', money), col('action', 'First step')],
         rows: top.map((a) => ({ title: a.title, where: a.items.length > 1 ? `${a.items.length} products` : a.items[0].label, exposure: a.exposure.amount, action: a.action })),
+      }
+    }
+    case 'match': {
+      const calls = r.signals.filter((f) => ['competitor-cut', 'competitor-strategy', 'competitor-promo'].includes(f.type))
+      const rows = calls.flatMap((f) =>
+        f.items.map((i) => ({ label: i.label, comp: i.competitor, compChg: i.compChg, units: i.unitsChg, share: i.shareChgPts, verdict: f.decision.verdict === 'RESPOND' && ((i.unitsChg ?? 0) > THRESHOLDS.unitsLoss && (i.shareChgPts ?? 0) > THRESHOLDS.shareLossPts) ? 'HOLD' : f.decision.verdict, stake: Math.abs(i.compChg ?? 0) * i.annRev }))
+      )
+      const holds = rows.filter((x) => x.verdict === 'HOLD')
+      const responds = rows.filter((x) => x.verdict === 'RESPOND')
+      return {
+        answer: !rows.length
+          ? 'No material competitor price cuts this period, so there is nothing to match.'
+          : responds.length === 0
+            ? `Not currently. On all ${rows.length} product lines with a competitor cut, our units and share are holding. Matching every cut would put ~${money(rows.reduce((t, x) => t + x.stake, 0))} a year of revenue at stake at current volume.`
+            : `Not across the board. Hold on ${holds.length}, where volume and share are holding; consider a response on ${responds.map((x) => x.label).join(', ')}, where volume is already slipping.`,
+        columns: [col('label', 'Product'), col('comp', 'Competitor'), col('compChg', 'Comp Δ', pct), col('units', 'Units Δ', pct), col('share', 'Share Δ', ptsFmt), col('verdict', 'Call'), col('stake', 'At stake if matched', money)],
+        rows,
+      }
+    }
+    case 'worry': {
+      const risks = r.alerts.filter((a) => a.category !== 'competitor' && a.severity !== 'opportunity')
+      const pats = r.patterns.filter((x) => x.kind !== 'competitor')
+      const rows = [
+        ...pats.map((x) => ({ what: x.title, where: x.scope, amount: x.exposure, call: 'INVESTIGATE' })),
+        ...risks.map((a) => ({ what: a.title, where: a.items.length > 1 ? `${a.items.length} products` : a.items[0].label, amount: a.exposure.amount, call: a.decision.verdict })),
+      ].sort((a, b) => b.amount - a.amount)
+      return {
+        answer: rows.length
+          ? `${rows[0].what} (${rows[0].where}, ~${money(rows[0].amount)}). It isn't a competitor move, which is why it's easy to miss.`
+          : 'Nothing outside competitor activity cleared the materiality floor.',
+        columns: [col('what', 'Issue'), col('where', 'Where'), col('amount', 'Est. exposure', money), col('call', 'Call')],
+        rows,
+      }
+    }
+    case 'track': {
+      const t = r.trackRecord
+      if (!t) return { answer: 'Needs at least three periods of data: the engine reruns itself on the earlier pair and checks those calls against the latest period.', columns: [], rows: [] }
+      return {
+        answer: `${t.rows.length} recommendation${t.rows.length !== 1 ? 's' : ''} issued on ${t.issuedIn} data: ${t.held} held up in ${t.checkedIn}, ${t.missed} hit a reassess trigger. This checks whether the data still supports each call, not whether the team acted on it.`,
+        columns: [col('verdict', 'Call'), col('where', 'Where'), col('headline', 'Recommendation'), col('status', 'Outcome'), col('detail', 'What happened')],
+        rows: t.rows.map((x) => ({ ...x, status: { held: 'Held up', missed: 'Trigger hit', open: 'Open', nodata: 'No data' }[x.status] })),
       }
     }
     case 'losing-price': {

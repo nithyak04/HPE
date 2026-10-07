@@ -138,6 +138,8 @@ code {
   color: #04120f;
   font-family: var(--font-display);
   font-weight: 700;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
   display: grid;
   place-items: center;
   box-shadow: 0 0 24px rgba(1, 169, 130, 0.35);

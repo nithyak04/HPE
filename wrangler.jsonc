@@ -1,7 +1,7 @@
 // Cloudflare Workers config: serves the Vite build in dist/ as static assets.
 // `name` must match the Worker's name in the Cloudflare dashboard.
 {
-  "name": "pricingengine",
+  "name": "pricing-intelligence",
   "compatibility_date": "2026-09-01",
   "assets": {
     "directory": "./dist",

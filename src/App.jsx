@@ -75,10 +75,10 @@ export default function App() {
     <div className="app">
       <aside className="rail">
         <div className="brand">
-          <span className="brand-mark">H</span>
+          <span className="brand-mark">PI</span>
           <span className="brand-text">
-            <strong>HPE</strong>
-            <span>Pricing Intelligence</span>
+            <strong>Pricing Intelligence</strong>
+            <span>Strategy engine</span>
           </span>
         </div>
         <nav className="rail-nav" aria-label="Views">

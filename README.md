@@ -42,4 +42,12 @@ npm run build     # production build to dist/
 npm run preview   # serve the build locally
 ```
 
-Deploys as a static site (Vercel or Cloudflare Pages — config for both is included).
+## Deploying
+
+It builds to plain static files, so any static host works.
+
+- **GitHub Pages** (`https://nithyak04.github.io/HPE/`): `.github/workflows/deploy-pages.yml` builds and deploys on every push to the default branch. One-time setup: repo Settings → Pages → Source: **GitHub Actions**.
+- **Vercel**: connected to the repo; production deploys from the default branch.
+- **Offline**: the build can also be inlined into a single HTML file that opens straight from disk.
+
+Asset paths are relative (`base: './'` in `vite.config.js`), so the same build works at a domain root or under a sub-path.

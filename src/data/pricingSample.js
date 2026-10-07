@@ -3,13 +3,18 @@
 // ----------------------------------------------------------------------------
 // SYNTHETIC DATA for learning the engine. Product names, competitors
 // ("Competitor A/B/C"), prices, units and shares are all made up and are not
-// real HPE or competitor figures. Two quarters, one row per
+// real HPE or competitor figures. Three quarters, one row per
 // SKU × region × channel × period.
 //
-// Each row is shaped so a different engine rule fires (competitor structural
-// cut, competitor promo, discount-driven ASP erosion, cost-driven margin
-// compression, pricing power, elasticity, etc.), plus one "quiet" product,
-// one discontinued and one new SKU.
+// Q2 → Q3 is shaped so a different engine rule fires on each row (competitor
+// structural cut, competitor promo, discount-driven ASP erosion, cost-driven
+// margin compression, pricing power, elasticity, etc.), plus one "quiet"
+// product, one discontinued and one new SKU.
+//
+// Q1 exists for the outcome loop: the engine reruns itself on Q1 → Q2,
+// issues the calls it would have made then, and checks them against Q3.
+// Most Q1 rows are Q2 with slightly lower units; Q1_OVERRIDES set up five
+// calls — three that hold up in Q3 and two that don't.
 // ============================================================================
 
 export const SAMPLE_COLUMNS = [
@@ -79,8 +84,24 @@ const PAIRS = [
     279000, 250000, 188, 180000, 242000, 'N', 9.4, 'Competitor C', 'C-AI 8'],
 ]
 
+const EARLIER = '2026-Q1'
 const PRIOR = '2026-Q2'
 const CURRENT = '2026-Q3'
+
+// Q1 values that differ from Q2, keyed by sku|region. Everything else in Q1
+// is Q2 with units scaled by 0.98.
+//   CMP-2U-STD NA   Competitor A cuts 6.5% in Q2, our units hold → HOLD; Q3 units −9%: trigger hit
+//   AI-ACC-8G NA    Competitor C cuts 5.9% in Q2, our units grow → HOLD; Q3 units +15%: held up
+//   STR-AF-200 APJ  we take +2.6% in Q2 and keep volume → TEST INCREASE; Q3 another +4.1%: held up
+//   STR-HY-100 EMEA Competitor B starts a promo in Q2 → HOLD list; Q3 volume steady: held up
+//   NET-SW-48 EMEA  ASP −3.4% in Q2 with flat units → INVESTIGATE; Q3 −6.3% more: still eroding
+const Q1_OVERRIDES = {
+  'CMP-2U-STD|NA': { comp: 12300, units: 3150, share: 30.6 },
+  'AI-ACC-8G|NA': { comp: 255000, units: 395, share: 13.6 },
+  'STR-AF-200|APJ': { asp: 76000, units: 405 },
+  'STR-HY-100|EMEA': { comp: 37200, promo: 'N' },
+  'NET-SW-48|EMEA': { asp: 5230, units: 3280 },
+}
 
 function row(period, sku, product, family, region, channel, list, asp, units, cost, comp, promo, share, competitor, compProduct) {
   return {
@@ -102,16 +123,26 @@ function row(period, sku, product, family, region, channel, list, asp, units, co
   }
 }
 
+function q1(p) {
+  const [sku, , , region] = p
+  const [list, asp, units, cost, comp, promo, share] = p.slice(5, 12)
+  const o = Q1_OVERRIDES[`${sku}|${region}`] || {}
+  return [list, o.asp ?? asp, o.units ?? Math.round(units * 0.98), cost, o.comp ?? comp, o.promo ?? promo, o.share ?? share]
+}
+
 export const SAMPLE_ROWS = [
   ...PAIRS.flatMap((p) => {
     const [sku, product, family, region, channel] = p
     const [competitor, compProduct] = p.slice(19)
     return [
+      row(EARLIER, sku, product, family, region, channel, ...q1(p), competitor, compProduct),
       row(PRIOR, sku, product, family, region, channel, ...p.slice(5, 12), competitor, compProduct),
       row(CURRENT, sku, product, family, region, channel, ...p.slice(12, 19), competitor, compProduct),
     ]
   }),
   // Discontinued after Q2
+  row(EARLIER, 'NET-SW-24', '24-port switch', 'Networking', 'APJ', 'Channel',
+    3400, 2700, 880, 1520, 2800, 'N', 12.0, 'Competitor C', 'C-Switch 24'),
   row(PRIOR, 'NET-SW-24', '24-port switch', 'Networking', 'APJ', 'Channel',
     3400, 2700, 900, 1520, 2800, 'N', 12.0, 'Competitor C', 'C-Switch 24'),
   // Launched in Q3

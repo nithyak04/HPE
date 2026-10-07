@@ -6,16 +6,21 @@ Single-page React app (Vite), no backend. Data you load never leaves the browser
 
 ## What it produces
 
-- **Pricing Intelligence Brief** — executive summary, priority alerts (🔴 high / 🟠 watch / 🟢 opportunity), competitive moves, emerging trends, opportunities, questions requiring human review, and data gaps.
-- Each alert: what changed, why it matters, estimated annualized exposure (with assumptions), competitive context, 2–4 likely drivers ranked by evidence, what data would separate them, a concrete next step, and a confidence level.
+- **Decision brief** — three columns a director can read in a minute: *what you need to know*, *what needs a decision*, *what to watch*.
+- **Priority signals** — each one runs the full chain FACT → SIGNAL → HYPOTHESIS → RECOMMENDATION → ACTION → OUTCOME: what changed, why it matters, 2–4 likely drivers ranked by evidence, then a verdict (HOLD, RESPOND, INVESTIGATE, TEST INCREASE, RECOVER, ADDRESS COST, REASSESS, MONITOR), the next analytical step, the condition that should trigger a reassessment, and the money at stake with its assumptions.
+- **Outcome loop** — with three or more periods, the engine reruns itself on the previous pair, takes the calls it would have made then, and grades each against the latest period (held up / trigger hit / open). It checks whether the data still supports a call, not whether the team acted on it.
+- **Engine-detected patterns** — cross-product issues quantified as one card, e.g. discount leakage across a region (realized ASP, list-price movement, discount depth, exposure, likely driver, where to look) or a competitor repricing several products at once.
+- **Price paths** — competitor price, our ASP, units and share across every period for each signal.
 - **Analyst mode** — answers questions like "Where are we losing price?", "Why is margin declining?", "Which products could support a price increase?" from the loaded data. Free text is matched to the closest supported question; answers are calculated, never generated.
 - **Price / volume / mix** — revenue and gross-margin bridges (price, volume, mix, cost), by-family breakdown, and elasticity signals.
 
-Every statement is labeled FACT (observed), SIGNAL (pattern detected), HYPOTHESIS (needs validation) or RECOMMENDATION (suggested next step). Nothing is invented: missing inputs are reported, not filled in.
+Every statement is labeled FACT (observed), SIGNAL (pattern detected), HYPOTHESIS (needs validation) or RECOMMENDATION (suggested next step). Nothing is invented: missing inputs are reported, not filled in. Confidence is High / Medium / Low from corroborating evidence — deliberately not a percentage, since nothing here is a calibrated probability.
+
+The engine is deterministic: every number (price/volume/mix, competitor deltas, exposure, materiality, thresholds) is calculated, not generated. That's the layer an LLM reasoning step would sit on top of, not replace.
 
 ## Input data
 
-CSV, one row per SKU × region × channel × period. The latest two periods are compared (sorted by label, so use sortable labels like `2026-Q2` / `2026-Q3`).
+CSV, one row per SKU × region × channel × period. The latest two periods drive the brief (sorted by label, so use sortable labels like `2026-Q2` / `2026-Q3`); a third or earlier period adds the outcome loop and price paths.
 
 | Column | Required | Unlocks |
 |---|---|---|
@@ -27,7 +32,7 @@ CSV, one row per SKU × region × channel × period. The latest two periods are 
 | `competitor_promo` (Y/N) | no | Separating promotional from structural competitor moves |
 | `market_share` | no | Share loss/gain signals |
 
-"Download template" in the app exports the built-in sample in this exact shape. The sample (`src/data/pricingSample.js`) is synthetic — made-up products, "Competitor A/B/C", and numbers.
+"Download template" in the app exports the built-in sample in this exact shape. The sample (`src/data/pricingSample.js`) is synthetic — made-up products, "Competitor A/B/C", and numbers — across three quarters, with Q1 set up so the outcome loop has calls that both hold up and fail.
 
 ## Tuning
 
